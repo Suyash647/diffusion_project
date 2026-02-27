@@ -2,20 +2,18 @@ import torch
 import math
 
 
-def timestep_embedding(t, dim):
+def timestep_embedding(timesteps, dim):
     """
-    Create sinusoidal timestep embeddings.
-    t: tensor of shape [batch]
-    returns: tensor of shape [batch, dim]
+    Sinusoidal timestep embeddings (like Transformer positional encoding)
     """
-    device = t.device
+    device = timesteps.device
     half_dim = dim // 2
-
-    emb = torch.exp(
-        torch.arange(half_dim, device=device) * -(math.log(10000) / (half_dim - 1))
-    )
-
-    emb = t[:, None].float() * emb[None, :]
+    emb = math.log(10000) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+    emb = timesteps[:, None] * emb[None, :]
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+
+    if dim % 2 == 1:
+        emb = torch.nn.functional.pad(emb, (0, 1))
 
     return emb

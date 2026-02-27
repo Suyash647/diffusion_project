@@ -5,50 +5,58 @@ from tqdm import tqdm
 
 from diffusion.scheduler import DiffusionScheduler
 from diffusion.forward import ForwardDiffusion
-from models.unet import SimpleCNN
+from models.unet import UNet
 
 
 def train():
 
-    print("TRAIN FUNCTION CALLED")
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # dataset
-    transform = transforms.Compose([transforms.ToTensor()])
-    dataset = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5),
+                             (0.5, 0.5, 0.5))
+    ])
 
-    # diffusion setup
-    scheduler = DiffusionScheduler(timesteps=300)
+    dataset = datasets.CIFAR10(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transform
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=128,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True
+    )
+
+    scheduler = DiffusionScheduler(timesteps=1000)
     forward = ForwardDiffusion(scheduler)
 
-    # model
-    model = SimpleCNN().to(device)
+    model = UNet().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
 
-    epochs = 30
+    epochs = 100
 
     for epoch in range(epochs):
-
         print(f"\nEpoch {epoch+1}/{epochs}")
 
         for images, _ in tqdm(loader):
 
             images = images.to(device)
 
-            # sample timestep
             t = torch.randint(
-                0, scheduler.timesteps, (images.shape[0],), device=device
+                0, scheduler.timesteps,
+                (images.shape[0],),
+                device=device
             )
 
-            # add noise
             xt, noise = forward.add_noise(images, t)
-
-            # predict noise
             pred_noise = model(xt, t)
 
-            # MSE loss (L_simple)
             loss = torch.mean((noise - pred_noise) ** 2)
 
             optimizer.zero_grad()
@@ -57,5 +65,5 @@ def train():
 
         print("Loss:", loss.item())
 
-    torch.save(model.state_dict(), "model.pth")
-    print("Model saved as model.pth") 
+    torch.save(model.state_dict(), "model_cifar10.pth")
+    print("Model saved.")

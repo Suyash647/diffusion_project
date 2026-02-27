@@ -1,50 +1,69 @@
 import torch
-import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from tqdm import tqdm
 
 from diffusion.scheduler import DiffusionScheduler
-from models.unet import SimpleCNN
+from diffusion.forward import ForwardDiffusion
+from models.unet import UNet
 
 
-def sample():
-
-    print("SAMPLE FUNCTION CALLED")
+def train():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5),
+                             (0.5, 0.5, 0.5))
+    ])
+
+    dataset = datasets.CIFAR10(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transform
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=128,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True
+    )
+
     scheduler = DiffusionScheduler(timesteps=1000)
+    forward = ForwardDiffusion(scheduler)
 
-    model = SimpleCNN().to(device)
-    model.load_state_dict(torch.load("model.pth", map_location=device))
-    model.eval()
+    model = UNet().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
 
-    # start from pure noise
-    x = torch.randn(1, 1, 28, 28).to(device)
+    epochs = 100
 
-    with torch.no_grad():
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
 
-        for t in reversed(range(scheduler.timesteps)):
+        for images, _ in tqdm(loader):
 
-            t_tensor = torch.tensor([t], device=device)
+            images = images.to(device)
 
-            pred_noise = model(x, t_tensor)
-
-            alpha = scheduler.alpha[t]
-            alpha_bar = scheduler.alpha_bar[t]
-            beta = scheduler.beta[t]
-
-            # reverse mean (Eq. 11)
-            x = (1 / torch.sqrt(alpha)) * (
-                x - (beta / torch.sqrt(1 - alpha_bar)) * pred_noise
+            t = torch.randint(
+                0, scheduler.timesteps,
+                (images.shape[0],),
+                device=device
             )
 
-            # add noise except final step
-            if t > 0:
-                noise = torch.randn_like(x)
-                x += torch.sqrt(beta) * noise
+            xt, noise = forward.add_noise(images, t)
+            pred_noise = model(xt, t)
 
-    img = x[0].detach().cpu().squeeze()
+            loss = torch.mean((noise - pred_noise) ** 2)
 
-    plt.imshow(img, cmap="gray")
-    plt.title("Generated Image")
-    plt.axis("off")
-    plt.show()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        print("Loss:", loss.item())
+
+    torch.save(model.state_dict(), "model_cifar10.pth")
+    print("Model saved.")
