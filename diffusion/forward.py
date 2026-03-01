@@ -7,13 +7,8 @@ class ForwardDiffusion:
 
     def add_noise(self, x0, t):
         device = x0.device
-
         alpha_bar = self.scheduler.alpha_bar.to(device)[t]
-
-        sqrt_alpha_bar = torch.sqrt(alpha_bar).view(-1, 1, 1, 1)
-        sqrt_one_minus = torch.sqrt(1 - alpha_bar).view(-1, 1, 1, 1)
-
+        sqrt_ab = torch.sqrt(alpha_bar)[:, None, None, None]
+        sqrt_1mab = torch.sqrt(1 - alpha_bar)[:, None, None, None]
         noise = torch.randn_like(x0)
-        xt = sqrt_alpha_bar * x0 + sqrt_one_minus * noise
-
-        return xt, noise
+        return sqrt_ab * x0 + sqrt_1mab * noise, noise

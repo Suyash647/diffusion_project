@@ -15,32 +15,56 @@ def train():
 
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.5,)*3, (0.5,)*3)
+        transforms.Normalize((0.5, 0.5, 0.5),
+                             (0.5, 0.5, 0.5))
     ])
 
-    dataset = datasets.CIFAR10("./data", train=True, download=True, transform=transform)
-    loader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=2)
+    dataset = datasets.CIFAR10(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transform
+    )
 
-    scheduler = DiffusionScheduler()
+    loader = DataLoader(
+        dataset,
+        batch_size=128,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True
+    )
+
+    scheduler = DiffusionScheduler(timesteps=1000)
     forward = ForwardDiffusion(scheduler)
 
-    model = UNet().to(device)
+    model = UNet(base_channels=128).to(device)
     ema = EMA(model)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=300
+    )
 
-    for epoch in range(100):
-        print(f"Epoch {epoch+1}")
+    epochs = 300
+
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
 
         for images, _ in tqdm(loader):
 
             images = images.to(device)
-            t = torch.randint(0, scheduler.timesteps, (images.size(0),), device=device)
+
+            t = torch.randint(
+                0, scheduler.timesteps,
+                (images.shape[0],),
+                device=device
+            )
 
             xt, noise = forward.add_noise(images, t)
-            pred = model(xt, t)
+            pred_noise = model(xt, t)
 
-            loss = torch.mean((noise - pred)**2)
+            loss = torch.mean((noise - pred_noise) ** 2)
 
             optimizer.zero_grad()
             loss.backward()
@@ -48,7 +72,8 @@ def train():
 
             ema.update(model)
 
+        lr_scheduler.step()
         print("Loss:", loss.item())
 
-    torch.save(ema.model.state_dict(), "model_cifar10.pth")
-    print("Saved EMA model.")
+    torch.save(ema.state_dict(), "model_ema.pth")
+    print("EMA model saved.")

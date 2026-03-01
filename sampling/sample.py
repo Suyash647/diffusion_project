@@ -1,69 +1,47 @@
 import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-from tqdm import tqdm
+from torchvision.utils import save_image
 
 from diffusion.scheduler import DiffusionScheduler
-from diffusion.forward import ForwardDiffusion
 from models.unet import UNet
 
 
-def train():
+def sample():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5),
-                             (0.5, 0.5, 0.5))
-    ])
-
-    dataset = datasets.CIFAR10(
-        root="./data",
-        train=True,
-        download=True,
-        transform=transform
-    )
-
-    loader = DataLoader(
-        dataset,
-        batch_size=128,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True
-    )
-
     scheduler = DiffusionScheduler(timesteps=1000)
-    forward = ForwardDiffusion(scheduler)
 
-    model = UNet().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+    model = UNet(base_channels=128).to(device)
+    model.load_state_dict(torch.load("model_ema.pth", map_location=device))
+    model.eval()
 
-    epochs = 100
+    x = torch.randn(64, 3, 32, 32).to(device)
 
-    for epoch in range(epochs):
-        print(f"\nEpoch {epoch+1}/{epochs}")
+    for t in reversed(range(scheduler.timesteps)):
 
-        for images, _ in tqdm(loader):
+        t_tensor = torch.full(
+            (x.shape[0],),
+            t,
+            device=device,
+            dtype=torch.long
+        )
 
-            images = images.to(device)
+        with torch.no_grad():
+            eps_theta = model(x, t_tensor)
 
-            t = torch.randint(
-                0, scheduler.timesteps,
-                (images.shape[0],),
-                device=device
-            )
+        alpha = scheduler.alpha[t].to(device)
+        alpha_bar = scheduler.alpha_bar[t].to(device)
+        beta = scheduler.beta[t].to(device)
 
-            xt, noise = forward.add_noise(images, t)
-            pred_noise = model(xt, t)
+        x = (1 / torch.sqrt(alpha)) * (
+            x - (beta / torch.sqrt(1 - alpha_bar)) * eps_theta
+        )
 
-            loss = torch.mean((noise - pred_noise) ** 2)
+        if t > 0:
+            noise = torch.randn_like(x)
+            x += torch.sqrt(beta) * noise
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    x = (x.clamp(-1, 1) + 1) / 2
+    save_image(x, "samples.png", nrow=8)
 
-        print("Loss:", loss.item())
-
-    torch.save(model.state_dict(), "model_cifar10.pth")
-    print("Model saved.")
+    print("Saved samples.png")
