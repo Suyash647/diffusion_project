@@ -1,111 +1,151 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.embeddings import timestep_embedding
+import math
 
 
+# ----------------------------
+# Sinusoidal Time Embedding
+# ----------------------------
+def timestep_embedding(timesteps, dim):
+    device = timesteps.device
+    half_dim = dim // 2
+    emb = math.log(10000) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+    emb = timesteps[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    return emb
+
+
+# ----------------------------
+# Self Attention
+# ----------------------------
 class SelfAttention(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.norm = nn.GroupNorm(8, channels)
-        self.q = nn.Conv2d(channels, channels, 1)
-        self.k = nn.Conv2d(channels, channels, 1)
-        self.v = nn.Conv2d(channels, channels, 1)
-        self.proj = nn.Conv2d(channels, channels, 1)
+        self.qkv = nn.Conv1d(channels, channels * 3, 1)
+        self.proj = nn.Conv1d(channels, channels, 1)
 
     def forward(self, x):
-        b, c, h, w = x.shape
-        x_norm = self.norm(x)
+        B, C, H, W = x.shape
+        x_in = x
 
-        q = self.q(x_norm).reshape(b, c, -1)
-        k = self.k(x_norm).reshape(b, c, -1)
-        v = self.v(x_norm).reshape(b, c, -1)
+        x = self.norm(x)
+        x = x.view(B, C, H * W)
 
-        attn = torch.softmax(torch.bmm(q.transpose(1, 2), k) / (c ** 0.5), dim=-1)
-        out = torch.bmm(v, attn.transpose(1, 2)).reshape(b, c, h, w)
+        qkv = self.qkv(x)
+        q, k, v = torch.chunk(qkv, 3, dim=1)
 
-        return x + self.proj(out)
+        attn = torch.softmax(torch.bmm(q.transpose(1, 2), k) / math.sqrt(C), dim=-1)
+        out = torch.bmm(v, attn.transpose(1, 2))
+
+        out = self.proj(out)
+        out = out.view(B, C, H, W)
+
+        return out + x_in
 
 
-class ResBlock(nn.Module):
+# ----------------------------
+# Residual Block
+# ----------------------------
+class Block(nn.Module):
     def __init__(self, in_ch, out_ch, time_dim):
         super().__init__()
+
         self.norm1 = nn.GroupNorm(8, in_ch)
         self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+
+        self.time_mlp = nn.Linear(time_dim, out_ch)
 
         self.norm2 = nn.GroupNorm(8, out_ch)
         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
 
-        self.time_mlp = nn.Linear(time_dim, out_ch)
+        self.act = nn.SiLU()
 
         if in_ch != out_ch:
-            self.shortcut = nn.Conv2d(in_ch, out_ch, 1)
+            self.res_conv = nn.Conv2d(in_ch, out_ch, 1)
         else:
-            self.shortcut = nn.Identity()
+            self.res_conv = nn.Identity()
 
     def forward(self, x, t):
-        h = self.conv1(F.silu(self.norm1(x)))
-        h += self.time_mlp(t)[:, :, None, None]
-        h = self.conv2(F.silu(self.norm2(h)))
-        return h + self.shortcut(x)
+        h = self.act(self.norm1(x))
+        h = self.conv1(h)
+
+        t_emb = self.time_mlp(t)[:, :, None, None]
+        h = h + t_emb
+
+        h = self.act(self.norm2(h))
+        h = self.conv2(h)
+
+        return h + self.res_conv(x)
 
 
+# ----------------------------
+# Diffusion UNet
+# ----------------------------
 class UNet(nn.Module):
-    def __init__(self, base=64, time_dim=256):
+    def __init__(self, in_channels=3, out_channels=3, base_channels=64, time_dim=256):
         super().__init__()
 
+        # Time embedding MLP
         self.time_mlp = nn.Sequential(
             nn.Linear(time_dim, time_dim),
             nn.SiLU(),
             nn.Linear(time_dim, time_dim),
         )
 
-        # Down
-        self.conv0 = nn.Conv2d(3, base, 3, padding=1)
-        self.res1 = ResBlock(base, base, time_dim)
-        self.res2 = ResBlock(base, base*2, time_dim)
-        self.res3 = ResBlock(base*2, base*4, time_dim)
-        self.res4 = ResBlock(base*4, base*8, time_dim)
+        # Initial conv
+        self.conv0 = nn.Conv2d(in_channels, base_channels, 3, padding=1)
 
-        self.attn = SelfAttention(base*2)
+        # Down blocks
+        self.down1 = Block(base_channels, base_channels * 2, time_dim)
+        self.down2 = Block(base_channels * 2, base_channels * 4, time_dim)
 
-        self.pool = nn.AvgPool2d(2)
+        self.pool = nn.MaxPool2d(2)
 
-        # Middle
-        self.mid1 = ResBlock(base*8, base*8, time_dim)
-        self.mid2 = ResBlock(base*8, base*8, time_dim)
+        # Bottleneck
+        self.bot1 = Block(base_channels * 4, base_channels * 4, time_dim)
+        self.attn = SelfAttention(base_channels * 4)
+        self.bot2 = Block(base_channels * 4, base_channels * 4, time_dim)
 
-        # Up
-        self.up4 = ResBlock(base*16, base*4, time_dim)
-        self.up3 = ResBlock(base*8, base*2, time_dim)
-        self.up2 = ResBlock(base*4, base, time_dim)
-        self.up1 = ResBlock(base*2, base, time_dim)
+        # Up blocks
+        
+        self.up1 = Block(base_channels * 8,
+                 base_channels * 2, time_dim)
+        self.up2 = Block(base_channels * 4,
+                 base_channels, time_dim)
 
-        self.final = nn.Conv2d(base, 3, 1)
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+
+        self.final = nn.Conv2d(base_channels, out_channels, 1)
+
+        self.time_dim = time_dim
 
     def forward(self, x, t):
-        t = timestep_embedding(t, 256)
+        # Time embedding
+        t = timestep_embedding(t, self.time_dim)
         t = self.time_mlp(t)
 
-        x1 = self.res1(self.conv0(x), t)
-        x2 = self.res2(self.pool(x1), t)
-        x2 = self.attn(x2)
-        x3 = self.res3(self.pool(x2), t)
-        x4 = self.res4(self.pool(x3), t)
+        # Down
+        x0 = self.conv0(x)
+        x1 = self.down1(x0, t)
+        x2 = self.pool(x1)
+        x2 = self.down2(x2, t)
+        x3 = self.pool(x2)
 
-        m = self.mid1(self.pool(x4), t)
-        m = self.mid2(m, t)
+        # Bottleneck
+        x3 = self.bot1(x3, t)
+        x3 = self.attn(x3)
+        x3 = self.bot2(x3, t)
 
-        u4 = F.interpolate(m, scale_factor=2)
-        u4 = self.up4(torch.cat([u4, x4], dim=1), t)
+        # Up
+        x4 = self.upsample(x3)
+        x4 = torch.cat([x4, x2], dim=1)
+        x4 = self.up1(x4, t)
 
-        u3 = F.interpolate(u4, scale_factor=2)
-        u3 = self.up3(torch.cat([u3, x3], dim=1), t)
+        x5 = self.upsample(x4)
+        x5 = torch.cat([x5, x1], dim=1)
+        x5 = self.up2(x5, t)
 
-        u2 = F.interpolate(u3, scale_factor=2)
-        u2 = self.up2(torch.cat([u2, x2], dim=1), t)
-
-        u1 = F.interpolate(u2, scale_factor=2)
-        u1 = self.up1(torch.cat([u1, x1], dim=1), t)
-
-        return self.final(u1)
+        return self.final(x5)
