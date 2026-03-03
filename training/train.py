@@ -2,10 +2,13 @@ import os
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler
+import torchvision.utils as vutils
 
 from models.unet import UNet
 from diffusion.forward import forward_diffusion_sample
 from diffusion.scheduler import get_noise_schedule
+from sampling.sample import sample
 
 
 def train():
@@ -13,23 +16,25 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # --------------------
+    # ------------------------
     # Hyperparameters
-    # --------------------
+    # ------------------------
     num_epochs = 300
     lr = 1e-4
-    batch_size = 128
-    T = 1000  # diffusion steps
+    batch_size = 256          # Increased for better GPU usage
+    T_train = 500             # Reduced training diffusion steps
+    T_sample = 1000           # Full steps for sampling
 
-    # --------------------
+    # ------------------------
     # Model & Optimizer
-    # --------------------
+    # ------------------------
     model = UNet(base_channels=128).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scaler = GradScaler()
 
-    # --------------------
+    # ------------------------
     # Resume Checkpoint
-    # --------------------
+    # ------------------------
     checkpoint_path = "checkpoint_latest.pth"
     start_epoch = 0
 
@@ -43,9 +48,9 @@ def train():
         start_epoch = checkpoint["epoch"] + 1
         print(f"Resuming from epoch {start_epoch}")
 
-    # --------------------
+    # ------------------------
     # Dataset
-    # --------------------
+    # ------------------------
     from torchvision import datasets, transforms
     from torch.utils.data import DataLoader
 
@@ -68,14 +73,19 @@ def train():
         pin_memory=True
     )
 
-    # --------------------
+    # ------------------------
     # Diffusion Scheduler
-    # --------------------
-    betas = get_noise_schedule(T)
+    # ------------------------
+    betas = get_noise_schedule(T_train)
 
-    # --------------------
+    # ------------------------
+    # Create Samples Folder
+    # ------------------------
+    os.makedirs("samples", exist_ok=True)
+
+    # ------------------------
     # Training Loop
-    # --------------------
+    # ------------------------
     for epoch in range(start_epoch, num_epochs):
 
         print(f"\nEpoch {epoch+1}/{num_epochs}")
@@ -87,7 +97,7 @@ def train():
 
             t = torch.randint(
                 0,
-                T,
+                T_train,
                 (images.size(0),),
                 device=device
             ).long()
@@ -101,24 +111,50 @@ def train():
 
             optimizer.zero_grad()
 
-            noise_pred = model(x_noisy, t)
-            loss = F.mse_loss(noise_pred, noise)
+            with autocast():
+                noise_pred = model(x_noisy, t)
+                loss = F.mse_loss(noise_pred, noise)
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += loss.item()
 
         avg_loss = epoch_loss / len(dataloader)
         print(f"Loss: {avg_loss:.6f}")
 
-        # --------------------
+        # ------------------------
         # Save Checkpoint
-        # --------------------
+        # ------------------------
         torch.save({
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
         }, checkpoint_path)
 
-        print("Checkpoint saved.\n")
+        print("Checkpoint saved.")
+
+        # ------------------------
+        # Generate Samples Every 5 Epochs
+        # ------------------------
+        if (epoch + 1) % 5 == 0:
+
+            model.eval()
+            with torch.no_grad():
+
+                samples = sample(
+                    model,
+                    T=T_sample,
+                    device=device,
+                    img_size=28,
+                    batch_size=16
+                )
+
+                samples = (samples + 1) / 2  # normalize if needed
+
+                grid = vutils.make_grid(samples, nrow=4)
+                vutils.save_image(grid, f"samples/epoch_{epoch+1}.png")
+
+            model.train()
+            print("Samples generated.")
