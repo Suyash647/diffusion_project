@@ -7,7 +7,7 @@ import torchvision.utils as vutils
 
 from models.unet import UNet
 from diffusion.forward import ForwardDiffusion
-from diffusion.scheduler import NoiseScheduler
+from diffusion.scheduler import get_noise_schedule
 from sampling.sample import sample
 
 
