@@ -6,8 +6,8 @@ from torch.cuda.amp import autocast, GradScaler
 import torchvision.utils as vutils
 
 from models.unet import UNet
-from diffusion.forward import forward_diffusion_sample
-from diffusion.scheduler import get_noise_schedule
+from diffusion.forward import ForwardDiffusion
+from diffusion.scheduler import NoiseScheduler
 from sampling.sample import sample
 
 
@@ -16,14 +16,17 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Enable fastest convolution algorithms
+    torch.backends.cudnn.benchmark = True
+
     # ------------------------
     # Hyperparameters
     # ------------------------
     num_epochs = 300
     lr = 1e-4
-    batch_size = 256          # Increased for better GPU usage
-    T_train = 500             # Reduced training diffusion steps
-    T_sample = 1000           # Full steps for sampling
+    batch_size = 512
+    T_train = 400
+    T_sample = 1000
 
     # ------------------------
     # Model & Optimizer
@@ -69,17 +72,20 @@ def train():
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4
     )
 
     # ------------------------
     # Diffusion Scheduler
     # ------------------------
-    betas = get_noise_schedule(T_train)
+    scheduler = NoiseScheduler(T_train)
+    forward_diffusion = ForwardDiffusion(scheduler)
 
     # ------------------------
-    # Create Samples Folder
+    # Samples Folder
     # ------------------------
     os.makedirs("samples", exist_ok=True)
 
@@ -102,15 +108,12 @@ def train():
                 device=device
             ).long()
 
-            x_noisy, noise = forward_diffusion_sample(
-                images,
-                t,
-                betas,
-                device
-            )
+            # Forward diffusion
+            x_noisy, noise = forward_diffusion.add_noise(images, t)
 
             optimizer.zero_grad()
 
+            # Mixed precision
             with autocast():
                 noise_pred = model(x_noisy, t)
                 loss = F.mse_loss(noise_pred, noise)
@@ -141,6 +144,7 @@ def train():
         if (epoch + 1) % 5 == 0:
 
             model.eval()
+
             with torch.no_grad():
 
                 samples = sample(
@@ -151,7 +155,7 @@ def train():
                     batch_size=16
                 )
 
-                samples = (samples + 1) / 2  # normalize if needed
+                samples = (samples + 1) / 2
 
                 grid = vutils.make_grid(samples, nrow=4)
                 vutils.save_image(grid, f"samples/epoch_{epoch+1}.png")

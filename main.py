@@ -1,13 +1,12 @@
 import argparse
-
 from training.train import train
 from sampling.sample import sample
 
 
-def main():
+if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, default="train")
+    parser.add_argument("--mode", type=str, required=True)
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -15,7 +14,3 @@ def main():
 
     elif args.mode == "sample":
         sample()
-
-
-if __name__ == "__main__":
-    main()
