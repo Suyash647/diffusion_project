@@ -1,41 +1,37 @@
 import torch
-from torchvision.utils import save_image
 from tqdm import tqdm
-
-from diffusion.scheduler import DiffusionScheduler
-from models.unet import UNet
+from diffusion.scheduler import get_noise_schedule
 
 
-def sample():
+def sample(model, T=1000, device="cuda", img_size=28, batch_size=16):
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    scheduler = DiffusionScheduler(1000).to(device)
-
-    model = UNet().to(device)
-    model.load_state_dict(torch.load("ema_model.pth", map_location=device))
     model.eval()
 
-    x = torch.randn(16, 3, 32, 32).to(device)
+    x = torch.randn(batch_size, 1, img_size, img_size).to(device)
 
-    for t in tqdm(reversed(range(scheduler.timesteps))):
+    betas = get_noise_schedule(T).to(device)
 
-        t_tensor = torch.full((16,), t, device=device, dtype=torch.long)
+    alphas = 1.0 - betas
+    alpha_bar = torch.cumprod(alphas, dim=0)
 
-        beta = scheduler.beta[t]
-        alpha = scheduler.alpha[t]
-        alpha_bar = scheduler.alpha_bar[t]
+    for t in tqdm(reversed(range(T))):
 
-        pred_noise = model(x, t_tensor)
+        t_tensor = torch.full((batch_size,), t, device=device, dtype=torch.long)
 
-        x = (1 / torch.sqrt(alpha)) * (
-            x - (beta / torch.sqrt(1 - alpha_bar)) * pred_noise
-        )
+        eps_theta = model(x, t_tensor)
+
+        alpha = alphas[t]
+        alpha_bar_t = alpha_bar[t]
 
         if t > 0:
             noise = torch.randn_like(x)
-            x += torch.sqrt(beta) * noise
+        else:
+            noise = torch.zeros_like(x)
 
-    x = (x.clamp(-1,1) + 1) / 2
-    save_image(x, "samples.png", nrow=4)
-    print("Saved samples.png")
+        x = (
+            (1 / torch.sqrt(alpha))
+            * (x - ((1 - alpha) / torch.sqrt(1 - alpha_bar_t)) * eps_theta)
+            + torch.sqrt(betas[t]) * noise
+        )
+
+    return x
