@@ -1,4 +1,5 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -23,14 +24,14 @@ def train():
     # ------------------------
     num_epochs = 300
     lr = 1e-4
-    batch_size = 512
+    batch_size = 128
     T_train = 400
     T_sample = 100
 
     # ------------------------
     # Model
     # ------------------------
-    model = UNet(base_channels=128).to(device)
+    model = UNet(base_channels=64).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scaler = GradScaler()
