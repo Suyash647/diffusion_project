@@ -1,16 +1,24 @@
-import copy
-import torch
-
-
 class EMA:
-    def __init__(self, model, decay=0.9999):
-        self.model = copy.deepcopy(model).eval()
+    
+    def __init__(self, model, decay=0.999):
+
         self.decay = decay
+        self.model = model
+        self.shadow = {}
 
-        for p in self.model.parameters():
-            p.requires_grad_(False)
+        for name, param in model.named_parameters():
+            self.shadow[name] = param.data.clone()
 
-    def update(self, model):
-        with torch.no_grad():
-            for ema_p, p in zip(self.model.parameters(), model.parameters()):
-                ema_p.data = self.decay * ema_p.data + (1 - self.decay) * p.data
+    def update(self):
+
+        for name, param in self.model.named_parameters():
+
+            self.shadow[name] = (
+                self.decay * self.shadow[name]
+                + (1 - self.decay) * param.data
+            )
+
+    def apply_shadow(self):
+
+        for name, param in self.model.named_parameters():
+            param.data = self.shadow[name]

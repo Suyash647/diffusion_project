@@ -1,5 +1,4 @@
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -7,62 +6,37 @@ from torch.cuda.amp import autocast, GradScaler
 import torchvision.utils as vutils
 
 from models.unet import UNet
-from diffusion.forward import forward_diffusion_sample
-from diffusion.scheduler import get_noise_schedule
+from diffusion.forward import ForwardDiffusion
+from diffusion.scheduler import NoiseScheduler
+from ema import EMA
 from sampling.sample import sample
 
 
 def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print("Using device:", device)
 
-    torch.backends.cudnn.benchmark = True
-
-    # ------------------------
-    # Hyperparameters
-    # ------------------------
     num_epochs = 300
     lr = 1e-4
     batch_size = 128
-    T_train = 400
-    T_sample = 100
+    T_train = 300
+    T_sample = 1000
 
-    # ------------------------
-    # Model
-    # ------------------------
     model = UNet(base_channels=64).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
     scaler = GradScaler()
 
-    # ------------------------
-    # Resume Checkpoint
-    # ------------------------
-    checkpoint_path = "checkpoint_latest.pth"
-    start_epoch = 0
+    ema = EMA(model)
 
-    if os.path.exists(checkpoint_path):
-
-        print("Loading checkpoint...")
-
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-        start_epoch = checkpoint["epoch"] + 1
-
-        print(f"Resuming from epoch {start_epoch}")
-
-    # ------------------------
-    # Dataset
-    # ------------------------
     from torchvision import datasets, transforms
     from torch.utils.data import DataLoader
 
     transform = transforms.Compose([
         transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
     ])
 
     dataset = datasets.MNIST(
@@ -76,26 +50,16 @@ def train():
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4
+        num_workers=2
     )
 
-    # ------------------------
-    # Diffusion Schedule
-    # ------------------------
-    betas = get_noise_schedule(T_train)
+    scheduler = NoiseScheduler(T_train)
 
-    # ------------------------
-    # Samples Folder
-    # ------------------------
+    forward_diffusion = ForwardDiffusion(scheduler)
+
     os.makedirs("samples", exist_ok=True)
 
-    # ------------------------
-    # Training Loop
-    # ------------------------
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(num_epochs):
 
         print(f"\nEpoch {epoch+1}/{num_epochs}")
 
@@ -112,13 +76,7 @@ def train():
                 device=device
             ).long()
 
-            # Forward diffusion
-            x_noisy, noise = forward_diffusion_sample(
-                images,
-                t,
-                betas,
-                device
-            )
+            x_noisy, noise = forward_diffusion.add_noise(images, t)
 
             optimizer.zero_grad()
 
@@ -134,49 +92,31 @@ def train():
 
             scaler.update()
 
+            ema.update()
+
             epoch_loss += loss.item()
 
-        avg_loss = epoch_loss / len(dataloader)
+        print("Loss:", epoch_loss / len(dataloader))
 
-        print(f"Loss: {avg_loss:.6f}")
-
-        # ------------------------
-        # Save Checkpoint
-        # ------------------------
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        }, checkpoint_path)
-
-        print("Checkpoint saved.")
-
-        # ------------------------
-        # Generate Samples
-        # ------------------------
         if (epoch + 1) % 5 == 0:
 
-            model.eval()
+            ema.apply_shadow()
 
-            with torch.no_grad():
+            samples = sample(
+                model,
+                T=T_sample,
+                device=device,
+                img_size=28,
+                batch_size=16
+            )
 
-                samples = sample(
-                    model,
-                    T=T_sample,
-                    device=device,
-                    img_size=28,
-                    batch_size=16
-                )
+            samples = torch.clamp((samples + 1) / 2, 0, 1)
 
-                samples = (samples + 1) / 2
+            grid = vutils.make_grid(samples, nrow=4)
 
-                grid = vutils.make_grid(samples, nrow=4)
-
-                vutils.save_image(
-                    grid,
-                    f"samples/epoch_{epoch+1}.png"
-                )
-
-            model.train()
+            vutils.save_image(
+                grid,
+                f"samples/epoch_{epoch+1}.png"
+            )
 
             print("Samples generated.")
