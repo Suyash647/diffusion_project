@@ -1,21 +1,23 @@
 import torch
 
 
-class ForwardDiffusion:
-    def __init__(self, scheduler):
-        self.scheduler = scheduler
+def forward_diffusion_sample(x0, t, betas, device):
+    """
+    Sample x_t from q(x_t | x_0)
+    """
 
-    def add_noise(self, x0, t):
-        device = x0.device
+    betas = betas.to(device)
 
-        alpha_bar = self.scheduler.alpha_bar.to(device)
-        alpha_bar_t = alpha_bar[t].view(-1, 1, 1, 1)
+    alphas = 1.0 - betas
+    alpha_bar = torch.cumprod(alphas, dim=0)
 
-        noise = torch.randn_like(x0)
+    alpha_bar_t = alpha_bar[t].view(-1, 1, 1, 1)
 
-        xt = (
-            torch.sqrt(alpha_bar_t) * x0 +
-            torch.sqrt(1 - alpha_bar_t) * noise
-        )
+    noise = torch.randn_like(x0)
 
-        return xt, noise
+    x_t = (
+        torch.sqrt(alpha_bar_t) * x0 +
+        torch.sqrt(1 - alpha_bar_t) * noise
+    )
+
+    return x_t, noise
